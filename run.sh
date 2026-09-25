@@ -3,19 +3,20 @@
 # on the target toolchain). Host cargo is used only to build rand deps.
 #
 # Usage:
-#   ./run.sh /path/to/rustc [--tier N] [--target TRIPLE]
+#   ./run.sh /path/to/rustc [options]
 #
-# Environment:
-#   RUST_LIBRARY_SRC  Path to rust library/ tree (default: ../rust/library)
-#   ET_EDITION        Rust edition for rustc (default: 2024)
-#   ET_OUT            Build output directory (default: ./out)
-#   ET_CARGO          Host cargo binary (default: cargo or ~/.cargo/bin/cargo)
-#   ET_TARGET         Cross-compile target triple (same as --target)
-#   RUNNER_SCRIPT     Script used to execute each compiled test binary
-#                     (default: <external-tester>/default-runner.sh)
-#   COMPILE_SCRIPT    Script used to compile each staged test to a binary
-#                     (default: <external-tester>/default-compile.sh)
-#   RUSTFLAGS         Forwarded to rustc/cargo (e.g. -C linker=hexagon-clang)
+# Options (defaults match the previous environment-variable behavior):
+#   --tier N
+#   --library-src DIR     (default: ../rust/library)
+#   --edition EDITION     (default: 2024)
+#   --out DIR             (default: ./out)
+#   --cargo-bin PATH      (default: cargo on PATH or ~/.cargo/bin/cargo)
+#   --target TRIPLE       (default: host)
+#   --runner-script PATH  (default: ./default-runner.sh)
+#   --compile-script PATH (default: ./default-compile.sh)
+#
+# Still honored from the environment when set (e.g. multi-flag linker setup):
+#   RUSTFLAGS, CARGO_TARGET_<TRIPLE>_LINKER
 
 set -euo pipefail
 
@@ -25,30 +26,35 @@ source "$SCRIPT_DIR/lib.sh"
 
 usage() {
   cat <<'EOF'
-Usage: ./run.sh /path/to/rustc [--tier N] [--target TRIPLE]
+Usage: ./run.sh /path/to/rustc [options]
 
-  --tier N       Run tiers 0..N inclusive (default: 4).
-  --target T     Cross-compile for target triple T (default: host).
-                 Also settable via ET_TARGET. Runner must execute the binary
-                 (default-runner.sh only works for host).
+Options:
+  --tier N                 Run tiers 0..N inclusive (default: 4)
+  --library-src DIR        rust library/ tree (default: ../rust/library)
+  --edition EDITION        rustc edition (default: 2024)
+  --out DIR                build output directory (default: ./out)
+  --cargo-bin PATH         host cargo for rand deps (default: auto-detect)
+  --target TRIPLE          cross-compile target (default: host)
+  --runner-script PATH     execute each test binary
+                           (default: ./default-runner.sh)
+  --compile-script PATH    rustc wrapper: <log> -- <rustc-args...>
+                           (default: ./default-compile.sh; harness builds flags)
+  -h, --help               show this help
 
-Environment:
-  RUST_LIBRARY_SRC   rust library/ directory (default: ../rust/library)
-  ET_EDITION         edition passed to rustc (default: 2024)
-  ET_OUT             output directory (default: ./out)
-  ET_CARGO           host cargo used only to build rand deps
-  ET_TARGET          same as --target
-  COMPILE_SCRIPT     how to compile each staged test → binary
-                     (default: ./default-compile.sh next to run.sh)
-  RUNNER_SCRIPT      how to execute each test binary
-                     (default: ./default-runner.sh next to run.sh)
-  RUSTFLAGS          extra rustc flags (linker, etc.)
-  CARGO_TARGET_<TRIPLE>_LINKER
-                     linker for cross cargo builds (triple uppercased, - → _)
+Also from environment (not CLI):
+  RUSTFLAGS, CARGO_TARGET_<TRIPLE>_LINKER
 EOF
 }
+
 MAX_TIER=4
 REQUESTED_TIER=""
+ARG_LIBRARY_SRC=""
+ARG_EDITION=""
+ARG_OUT=""
+ARG_CARGO=""
+ARG_TARGET=""
+ARG_RUNNER=""
+ARG_COMPILE=""
 
 if [[ $# -lt 1 ]]; then
   usage
@@ -65,10 +71,15 @@ esac
 ET_RUSTC="$(et_resolve_rustc "$1")"
 shift
 
+need_arg() {
+  local flag="$1"
+  [[ $# -ge 2 ]] || et_die "$flag requires an argument"
+}
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --tier)
-      [[ $# -ge 2 ]] || et_die "--tier requires a number"
+      need_arg "$@"
       REQUESTED_TIER="$2"
       shift 2
       ;;
@@ -76,13 +87,67 @@ while [[ $# -gt 0 ]]; do
       REQUESTED_TIER="${1#--tier=}"
       shift
       ;;
+    --library-src)
+      need_arg "$@"
+      ARG_LIBRARY_SRC="$2"
+      shift 2
+      ;;
+    --library-src=*)
+      ARG_LIBRARY_SRC="${1#--library-src=}"
+      shift
+      ;;
+    --edition)
+      need_arg "$@"
+      ARG_EDITION="$2"
+      shift 2
+      ;;
+    --edition=*)
+      ARG_EDITION="${1#--edition=}"
+      shift
+      ;;
+    --out)
+      need_arg "$@"
+      ARG_OUT="$2"
+      shift 2
+      ;;
+    --out=*)
+      ARG_OUT="${1#--out=}"
+      shift
+      ;;
+    --cargo-bin)
+      need_arg "$@"
+      ARG_CARGO="$2"
+      shift 2
+      ;;
+    --cargo-bin=*)
+      ARG_CARGO="${1#--cargo-bin=}"
+      shift
+      ;;
     --target)
-      [[ $# -ge 2 ]] || et_die "--target requires a triple"
-      ET_TARGET="$2"
+      need_arg "$@"
+      ARG_TARGET="$2"
       shift 2
       ;;
     --target=*)
-      ET_TARGET="${1#--target=}"
+      ARG_TARGET="${1#--target=}"
+      shift
+      ;;
+    --runner-script)
+      need_arg "$@"
+      ARG_RUNNER="$2"
+      shift 2
+      ;;
+    --runner-script=*)
+      ARG_RUNNER="${1#--runner-script=}"
+      shift
+      ;;
+    --compile-script)
+      need_arg "$@"
+      ARG_COMPILE="$2"
+      shift 2
+      ;;
+    --compile-script=*)
+      ARG_COMPILE="${1#--compile-script=}"
       shift
       ;;
     -h|--help)
@@ -104,12 +169,23 @@ else
   REQUESTED_TIER=4
 fi
 
+# Apply CLI over previous env defaults (same defaults as before).
+if [[ -n "$ARG_LIBRARY_SRC" ]]; then
+  RUST_LIBRARY_SRC="$ARG_LIBRARY_SRC"
+fi
+ET_EDITION="${ARG_EDITION:-${ET_EDITION:-2024}}"
+ET_OUT="${ARG_OUT:-${ET_OUT:-$ET_ROOT/out}}"
+if [[ -n "$ARG_CARGO" ]]; then
+  ET_CARGO="$ARG_CARGO"
+fi
+ET_TARGET="${ARG_TARGET:-${ET_TARGET:-}}"
+
 ET_LIBRARY="$(et_resolve_library_src)"
 mkdir -p "$ET_OUT"
 
-# Also clear exported dep paths on failure paths - grep for ET_DEP_READY=0
-# Resolve runner: RUNNER_SCRIPT or default-runner.sh beside run.sh.
-if [[ -n "${RUNNER_SCRIPT:-}" ]]; then
+if [[ -n "$ARG_RUNNER" ]]; then
+  ET_RUNNER="$ARG_RUNNER"
+elif [[ -n "${RUNNER_SCRIPT:-}" ]]; then
   ET_RUNNER="$RUNNER_SCRIPT"
 else
   ET_RUNNER="$ET_ROOT/default-runner.sh"
@@ -118,11 +194,12 @@ if [[ ! -x "$ET_RUNNER" && -f "$ET_RUNNER" ]]; then
   chmod +x "$ET_RUNNER" || true
 fi
 if [[ ! -f "$ET_RUNNER" ]]; then
-  et_die "runner script not found: $ET_RUNNER (set RUNNER_SCRIPT)"
+  et_die "runner script not found: $ET_RUNNER"
 fi
 
-# Resolve compiler: COMPILE_SCRIPT or default-compile.sh beside run.sh.
-if [[ -n "${COMPILE_SCRIPT:-}" ]]; then
+if [[ -n "$ARG_COMPILE" ]]; then
+  ET_COMPILER="$ARG_COMPILE"
+elif [[ -n "${COMPILE_SCRIPT:-}" ]]; then
   ET_COMPILER="$COMPILE_SCRIPT"
 else
   ET_COMPILER="$ET_ROOT/default-compile.sh"
@@ -131,10 +208,9 @@ if [[ ! -x "$ET_COMPILER" && -f "$ET_COMPILER" ]]; then
   chmod +x "$ET_COMPILER" || true
 fi
 if [[ ! -f "$ET_COMPILER" ]]; then
-  et_die "compile script not found: $ET_COMPILER (set COMPILE_SCRIPT)"
+  et_die "compile script not found: $ET_COMPILER"
 fi
 
-# Prefer absolute paths for child processes.
 if command -v realpath >/dev/null 2>&1; then
   ET_RUNNER="$(realpath "$ET_RUNNER")"
   ET_COMPILER="$(realpath "$ET_COMPILER")"
@@ -145,6 +221,7 @@ echo "version:  $($ET_RUSTC --version 2>/dev/null || echo '?')"
 echo "sysroot:  $($ET_RUSTC --print sysroot 2>/dev/null || echo '?')"
 echo "library:  $ET_LIBRARY"
 echo "out:      $ET_OUT"
+echo "edition:  $ET_EDITION"
 echo "compile:  $ET_COMPILER"
 echo "runner:   $ET_RUNNER"
 if [[ -n "${ET_TARGET:-}" ]]; then

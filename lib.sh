@@ -209,13 +209,7 @@ EOF
     --extern "rand_xorshift=$xor_rlib"
     -L "dependency=$deps_lib"
   )
-  # Exported for COMPILE_SCRIPT / default-compile.sh
-  ET_DEP_RAND_RLIB="$rand_rlib"
-  ET_DEP_RAND_XORSHIFT_RLIB="$xor_rlib"
-  ET_DEP_LIBDIR="$deps_lib"
-  export ET_DEP_RAND_RLIB ET_DEP_RAND_XORSHIFT_RLIB ET_DEP_LIBDIR
   ET_DEP_READY=1
-  export ET_DEP_READY
   echo "  deps ready: rand + rand_xorshift ($deps_lib)"
 }
 
@@ -298,31 +292,53 @@ et_stage_src() {
   echo "$staged"
 }
 
-# Compile via COMPILE_SCRIPT (default: default-compile.sh).
+# Build rustc argv and invoke COMPILE_SCRIPT; retry with feature fixups on failure.
 # Args: staged_src out_bin compile_log [--test]
 et_compile_with_fixups() {
   local staged="$1"
   local bin="$2"
   local log="$3"
   shift 3
+  local mode_args=("$@")
 
   if [[ -z "${ET_COMPILER:-}" ]]; then
     et_die "ET_COMPILER is not set (internal error)"
   fi
 
-  set +e
-  ET_RUSTC="$ET_RUSTC" \
-  ET_EDITION="${ET_EDITION:-2024}" \
-  ET_TARGET="${ET_TARGET:-}" \
-  ET_DEP_READY="${ET_DEP_READY:-0}" \
-  ET_DEP_RAND_RLIB="${ET_DEP_RAND_RLIB:-}" \
-  ET_DEP_RAND_XORSHIFT_RLIB="${ET_DEP_RAND_XORSHIFT_RLIB:-}" \
-  ET_DEP_LIBDIR="${ET_DEP_LIBDIR:-}" \
-  ET_FIX_FEATURES="$ET_FIX_FEATURES" \
-    "$ET_COMPILER" "$staged" "$bin" "$log" "$@"
-  local rc=$?
-  set -e
-  return "$rc"
+  local max_attempts="${ET_COMPILE_MAX_ATTEMPTS:-20}"
+  local attempt
+  for ((attempt = 1; attempt <= max_attempts; attempt++)); do
+    local cmd=(
+      --edition "${ET_EDITION:-2024}"
+    )
+    if [[ -n "${ET_TARGET:-}" ]]; then
+      cmd+=(--target "$ET_TARGET")
+    fi
+    if ((${#mode_args[@]})); then
+      cmd+=("${mode_args[@]}")
+    fi
+    cmd+=("$staged" -o "$bin")
+    if ((ET_DEP_READY)); then
+      cmd+=("${ET_DEP_LFLAGS[@]}")
+    fi
+
+    set +e
+    ET_RUSTC="$ET_RUSTC" "$ET_COMPILER" "$log" -- "${cmd[@]}"
+    local rc=$?
+    set -e
+    if [[ $rc -eq 0 ]]; then
+      return 0
+    fi
+
+    if ! python3 "$ET_FIX_FEATURES" "$staged" "$log" >"${log}.fix" 2>&1; then
+      return 1
+    fi
+    {
+      echo "----- feature fixup attempt $attempt -----"
+      cat "${log}.fix"
+    } >>"$log"
+  done
+  return 1
 }
 
 # Compile and run one test crate root (path in the original library tree).
