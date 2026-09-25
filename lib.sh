@@ -20,10 +20,18 @@ ET_TARGET="${ET_TARGET:-}"
 ET_OWN_MAIN="${ET_OWN_MAIN:-0}"
 
 # Counters (global; run.sh resets them)
+# Files = allowlisted crate roots. Tests = individual #[test] cases from harness output.
+ET_COMPILE_OK=0
+ET_COMPILE_FAIL=0
+ET_RUN_OK=0
+ET_RUN_FAIL=0
+ET_SKIP=0
+ET_TEST_PASS=0
+ET_TEST_FAIL=0
+ET_TEST_IGNORE=0
+# Back-compat aliases used in older messages (files that ran ok / failed)
 ET_PASS=0
 ET_FAIL=0
-ET_COMPILE_FAIL=0
-ET_SKIP=0
 
 et_die() {
   echo "error: $*" >&2
@@ -296,12 +304,24 @@ et_stage_src() {
 }
 
 # Rewrite staged crate to call #[test] fns from a generated main (no libtest).
+# Expands macros via rustc -Zunpretty=expanded when ET_RUSTC is set so
+# macro-generated tests match libtest coverage as closely as possible.
 et_apply_own_main() {
   local staged="$1"
   if [[ "${ET_OWN_MAIN:-0}" != "1" ]]; then
     return 0
   fi
-  python3 "$ET_OWN_MAIN_PY" "$staged"
+  local expand_flags=()
+  if ((ET_DEP_READY)); then
+    expand_flags+=("${ET_DEP_LFLAGS[@]}")
+  fi
+  # shellcheck disable=SC2086
+  ET_RUSTC="$ET_RUSTC" \
+  ET_EDITION="${ET_EDITION:-2024}" \
+  ET_TARGET="${ET_TARGET:-}" \
+  ET_EXPAND_FLAGS="${expand_flags[*]}" \
+  RUSTC_BOOTSTRAP="${RUSTC_BOOTSTRAP:-1}" \
+    python3 "$ET_OWN_MAIN_PY" "$staged"
 }
 
 # Build rustc argv and invoke COMPILE_SCRIPT; retry with feature fixups on failure.
@@ -353,6 +373,41 @@ et_compile_with_fixups() {
   return 1
 }
 
+# Parse "N passed; M failed; K ignored" from a libtest / own-main summary line.
+# Sets _et_tp, _et_tf, _et_ti. Returns 0 if parsed.
+et_extract_test_counts() {
+  local line="$1"
+  _et_tp=0
+  _et_tf=0
+  _et_ti=0
+  if [[ "$line" =~ ([0-9]+)[[:space:]]+passed\;[[:space:]]+([0-9]+)[[:space:]]+failed\;[[:space:]]+([0-9]+)[[:space:]]+ignored ]]; then
+    _et_tp="${BASH_REMATCH[1]}"
+    _et_tf="${BASH_REMATCH[2]}"
+    _et_ti="${BASH_REMATCH[3]}"
+    return 0
+  fi
+  return 1
+}
+
+# Read harness summary from a run log; accumulate ET_TEST_*; set ET_LAST_SUMMARY.
+et_accumulate_from_run_log() {
+  local run_log="$1"
+  local no_harness="$2"
+  ET_LAST_SUMMARY=""
+  local line=""
+  if [[ "$no_harness" -eq 0 ]]; then
+    line="$(grep -E '^test result:' "$run_log" 2>/dev/null | tail -n1 || true)"
+  else
+    line="$(grep -E '^own-main result:' "$run_log" 2>/dev/null | tail -n1 || true)"
+  fi
+  ET_LAST_SUMMARY="$line"
+  if [[ -n "$line" ]] && et_extract_test_counts "$line"; then
+    ET_TEST_PASS=$((ET_TEST_PASS + _et_tp))
+    ET_TEST_FAIL=$((ET_TEST_FAIL + _et_tf))
+    ET_TEST_IGNORE=$((ET_TEST_IGNORE + _et_ti))
+  fi
+}
+
 # Compile and run one test crate root (path in the original library tree).
 et_run_one() {
   local suite="$1"
@@ -397,6 +452,7 @@ et_run_one() {
     ET_COMPILE_FAIL=$((ET_COMPILE_FAIL + 1))
     return 0
   fi
+  ET_COMPILE_OK=$((ET_COMPILE_OK + 1))
 
   echo "  RUN      $suite/$name"
   set +e
@@ -411,29 +467,26 @@ et_run_one() {
   local rc=$?
   set -e
 
+  et_accumulate_from_run_log "$run_log" "$no_harness"
+  local summary="$ET_LAST_SUMMARY"
+  # Non-harness / stub-main binaries often have no count line — show last line.
+  if [[ -z "$summary" && "$no_harness" -eq 1 ]]; then
+    summary="$(tail -n1 "$run_log" 2>/dev/null | tr -d '\r' || true)"
+  fi
+
   if [[ $rc -eq 0 ]]; then
-    local summary=""
-    if [[ $no_harness -eq 0 ]]; then
-      summary="$(grep -E '^test result:' "$run_log" | tail -n1 || true)"
-    else
-      summary="$(grep -E '^own-main result:' "$run_log" | tail -n1 || true)"
-      if [[ -z "$summary" ]]; then
-        summary="$(tail -n1 "$run_log" | tr -d '\r' || true)"
-      fi
-    fi
     if [[ -n "$summary" ]]; then
       echo "  PASS     $suite/$name — $summary"
     else
       echo "  PASS     $suite/$name"
     fi
+    ET_RUN_OK=$((ET_RUN_OK + 1))
     ET_PASS=$((ET_PASS + 1))
   else
     echo "  FAIL     $suite/$name (exit $rc)"
     echo "    see $run_log"
-    # Still show libtest summary on failure when present
-    local summary
-    summary="$(grep -E '^test result:' "$run_log" | tail -n1 || true)"
-    [[ -n "$summary" ]] && echo "    $summary"
+    [[ -n "$ET_LAST_SUMMARY" ]] && echo "    $ET_LAST_SUMMARY"
+    ET_RUN_FAIL=$((ET_RUN_FAIL + 1))
     ET_FAIL=$((ET_FAIL + 1))
   fi
 }
@@ -450,15 +503,19 @@ et_read_tier_list() {
 }
 
 et_print_summary() {
+  local compile_total=$((ET_COMPILE_OK + ET_COMPILE_FAIL))
+  local run_total=$((ET_RUN_OK + ET_RUN_FAIL))
+  local test_exec=$((ET_TEST_PASS + ET_TEST_FAIL))
+
   echo
   echo "=== Summary ==="
-  echo "  pass:         $ET_PASS"
-  echo "  fail:         $ET_FAIL"
-  echo "  compile-fail: $ET_COMPILE_FAIL"
-  echo "  skip:         $ET_SKIP"
-  local attempted=$((ET_PASS + ET_FAIL + ET_COMPILE_FAIL))
-  echo "  attempted:    $attempted"
-  if [[ $ET_FAIL -gt 0 || $ET_COMPILE_FAIL -gt 0 ]]; then
+  echo "  (files = crate roots from allowlists; tests = individual #[test] cases)"
+  echo "  compiles-successful: ${ET_COMPILE_OK}/${compile_total}"
+  echo "  runs-successful:     ${ET_RUN_OK}/${run_total}"
+  echo "  tests-successful:    ${ET_TEST_PASS}/${test_exec}"
+  echo "  tests-ignored:       ${ET_TEST_IGNORE}"
+  echo "  files-skipped:       ${ET_SKIP}"
+  if [[ $ET_RUN_FAIL -gt 0 || $ET_COMPILE_FAIL -gt 0 || $ET_TEST_FAIL -gt 0 ]]; then
     return 1
   fi
   return 0

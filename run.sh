@@ -248,10 +248,16 @@ echo
 et_prepare_deps
 echo
 
+ET_COMPILE_OK=0
+ET_COMPILE_FAIL=0
+ET_RUN_OK=0
+ET_RUN_FAIL=0
+ET_SKIP=0
+ET_TEST_PASS=0
+ET_TEST_FAIL=0
+ET_TEST_IGNORE=0
 ET_PASS=0
 ET_FAIL=0
-ET_COMPILE_FAIL=0
-ET_SKIP=0
 
 run_tier() {
   local tier="$1"
