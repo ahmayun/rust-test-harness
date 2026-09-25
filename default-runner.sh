@@ -11,10 +11,14 @@
 #   ET_TEST_SRC        original source path in the library tree
 #   ET_TEST_STAGED     staged (possibly feature-fixed) source used to compile
 #   ET_TEST_NO_HARNESS 1 if compiled without --test (plain binary)
+#   ET_TEST_TARGET     target triple when cross-compiling (empty = host)
 #   ET_RUSTC           rustc used to compile the binary
 #
 # Extra CLI args after the binary are forwarded (unused by default).
 # Exit status of the binary is preserved.
+#
+# For cross builds, replace this script (RUNNER_SCRIPT) with one that runs the
+# binary on the target (QEMU, device, etc.). Do not exec a foreign binary here.
 
 set -euo pipefail
 

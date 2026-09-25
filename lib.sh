@@ -13,6 +13,9 @@ ET_FIX_FEATURES="$ET_SCRIPTS/fix_features.py"
 ET_DEP_LFLAGS=()
 ET_DEP_READY=0
 
+# Cross-compile target triple (empty = host). Set via --target or ET_TARGET.
+ET_TARGET="${ET_TARGET:-}"
+
 # Counters (global; run.sh resets them)
 ET_PASS=0
 ET_FAIL=0
@@ -66,6 +69,16 @@ et_find_cargo() {
     return 0
   fi
   return 1
+}
+
+# Directory under cargo target dir where release deps land.
+et_cargo_deps_libdir() {
+  local target_dir="$1"
+  if [[ -n "${ET_TARGET:-}" ]]; then
+    echo "$target_dir/$ET_TARGET/release/deps"
+  else
+    echo "$target_dir/release/deps"
+  fi
 }
 
 # Build rand / rand_xorshift with host cargo + the given rustc (offline when possible).
@@ -122,7 +135,13 @@ EOF
   echo 'pub use rand; pub use rand_xorshift;' >"$manifest_dir/lib.rs"
 
   echo "Preparing deps (rand, rand_xorshift) with host cargo + given rustc..."
+  if [[ -n "${ET_TARGET:-}" ]]; then
+    echo "  cross target: $ET_TARGET"
+  fi
   local cargo_args=(build --release)
+  if [[ -n "${ET_TARGET:-}" ]]; then
+    cargo_args+=(--target "$ET_TARGET")
+  fi
   if [[ -n "$rand_src" && -n "$xor_src" ]]; then
     cargo_args+=(--offline)
   fi
@@ -150,12 +169,16 @@ path = "lib.rs"
 rand = { version = "0.9.0", default-features = false, features = ["alloc"] }
 rand_xorshift = "0.4.0"
 EOF
+      local retry_args=(build --release)
+      if [[ -n "${ET_TARGET:-}" ]]; then
+        retry_args+=(--target "$ET_TARGET")
+      fi
       if ! (
         cd "$manifest_dir"
         CARGO_TARGET_DIR="$target_dir" \
           RUSTC="$ET_RUSTC" \
           RUSTC_BOOTSTRAP=1 \
-          "$cargo" build --release
+          "$cargo" "${retry_args[@]}"
       ) >"$deps_dir/build.log" 2>&1; then
         echo "warning: deps build failed again; continuing without rand" >&2
         ET_DEP_READY=0
@@ -169,7 +192,8 @@ EOF
     fi
   fi
 
-  local deps_lib="$target_dir/release/deps"
+  local deps_lib
+  deps_lib="$(et_cargo_deps_libdir "$target_dir")"
   local rand_rlib xor_rlib
   rand_rlib="$(ls "$deps_lib"/librand-*.rlib 2>/dev/null | head -n1 || true)"
   xor_rlib="$(ls "$deps_lib"/librand_xorshift-*.rlib 2>/dev/null | head -n1 || true)"
@@ -185,8 +209,14 @@ EOF
     --extern "rand_xorshift=$xor_rlib"
     -L "dependency=$deps_lib"
   )
+  # Exported for COMPILE_SCRIPT / default-compile.sh
+  ET_DEP_RAND_RLIB="$rand_rlib"
+  ET_DEP_RAND_XORSHIFT_RLIB="$xor_rlib"
+  ET_DEP_LIBDIR="$deps_lib"
+  export ET_DEP_RAND_RLIB ET_DEP_RAND_XORSHIFT_RLIB ET_DEP_LIBDIR
   ET_DEP_READY=1
-  echo "  deps ready: rand + rand_xorshift"
+  export ET_DEP_READY
+  echo "  deps ready: rand + rand_xorshift ($deps_lib)"
 }
 
 et_bin_name() {
@@ -268,47 +298,31 @@ et_stage_src() {
   echo "$staged"
 }
 
-# Compile with iterative feature fixups on the staged source.
+# Compile via COMPILE_SCRIPT (default: default-compile.sh).
 # Args: staged_src out_bin compile_log [--test]
 et_compile_with_fixups() {
   local staged="$1"
   local bin="$2"
   local log="$3"
   shift 3
-  local mode_args=("$@")
 
-  local max_attempts=20
-  local attempt
-  for ((attempt = 1; attempt <= max_attempts; attempt++)); do
-    local cmd=(
-      "$ET_RUSTC"
-      --edition "${ET_EDITION:-2024}"
-    )
-    if ((${#mode_args[@]})); then
-      cmd+=("${mode_args[@]}")
-    fi
-    cmd+=("$staged" -o "$bin")
-    if ((ET_DEP_READY)); then
-      cmd+=("${ET_DEP_LFLAGS[@]}")
-    fi
+  if [[ -z "${ET_COMPILER:-}" ]]; then
+    et_die "ET_COMPILER is not set (internal error)"
+  fi
 
-    set +e
-    RUSTC_BOOTSTRAP=1 "${cmd[@]}" >"$log" 2>&1
-    local rc=$?
-    set -e
-    if [[ $rc -eq 0 ]]; then
-      return 0
-    fi
-
-    if ! python3 "$ET_FIX_FEATURES" "$staged" "$log" >"${log}.fix" 2>&1; then
-      return 1
-    fi
-    {
-      echo "----- feature fixup attempt $attempt -----"
-      cat "${log}.fix"
-    } >>"$log"
-  done
-  return 1
+  set +e
+  ET_RUSTC="$ET_RUSTC" \
+  ET_EDITION="${ET_EDITION:-2024}" \
+  ET_TARGET="${ET_TARGET:-}" \
+  ET_DEP_READY="${ET_DEP_READY:-0}" \
+  ET_DEP_RAND_RLIB="${ET_DEP_RAND_RLIB:-}" \
+  ET_DEP_RAND_XORSHIFT_RLIB="${ET_DEP_RAND_XORSHIFT_RLIB:-}" \
+  ET_DEP_LIBDIR="${ET_DEP_LIBDIR:-}" \
+  ET_FIX_FEATURES="$ET_FIX_FEATURES" \
+    "$ET_COMPILER" "$staged" "$bin" "$log" "$@"
+  local rc=$?
+  set -e
+  return "$rc"
 }
 
 # Compile and run one test crate root (path in the original library tree).
@@ -356,6 +370,7 @@ et_run_one() {
   ET_TEST_SRC="$src" \
   ET_TEST_STAGED="$staged" \
   ET_TEST_NO_HARNESS="$no_harness" \
+  ET_TEST_TARGET="${ET_TARGET:-}" \
   ET_RUSTC="$ET_RUSTC" \
     "$ET_RUNNER" "$bin" >"$run_log" 2>&1
   local rc=$?
