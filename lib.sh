@@ -8,6 +8,7 @@ ET_OUT="${ET_OUT:-$ET_ROOT/out}"
 ET_TIERS="$ET_ROOT/tiers"
 ET_SCRIPTS="$ET_ROOT/scripts"
 ET_FIX_FEATURES="$ET_SCRIPTS/fix_features.py"
+ET_OWN_MAIN_PY="$ET_SCRIPTS/own_main.py"
 
 # Set by et_prepare_deps
 ET_DEP_LFLAGS=()
@@ -15,6 +16,8 @@ ET_DEP_READY=0
 
 # Cross-compile target triple (empty = host). Set via --target or ET_TARGET.
 ET_TARGET="${ET_TARGET:-}"
+# When 1, generate a hand-written main instead of using rustc --test / libtest.
+ET_OWN_MAIN="${ET_OWN_MAIN:-0}"
 
 # Counters (global; run.sh resets them)
 ET_PASS=0
@@ -292,6 +295,15 @@ et_stage_src() {
   echo "$staged"
 }
 
+# Rewrite staged crate to call #[test] fns from a generated main (no libtest).
+et_apply_own_main() {
+  local staged="$1"
+  if [[ "${ET_OWN_MAIN:-0}" != "1" ]]; then
+    return 0
+  fi
+  python3 "$ET_OWN_MAIN_PY" "$staged"
+}
+
 # Build rustc argv and invoke COMPILE_SCRIPT; retry with feature fixups on failure.
 # Args: staged_src out_bin compile_log [--test]
 et_compile_with_fixups() {
@@ -367,6 +379,13 @@ et_run_one() {
   local no_harness=0
   if et_is_no_harness "$src"; then
     no_harness=1
+  elif [[ "${ET_OWN_MAIN:-0}" == "1" ]]; then
+    no_harness=1
+    if ! et_apply_own_main "$staged"; then
+      echo "  COMPILE-FAIL  $suite/$name (own-main rewrite)"
+      ET_COMPILE_FAIL=$((ET_COMPILE_FAIL + 1))
+      return 0
+    fi
   else
     mode_args=(--test)
   fi
@@ -397,7 +416,10 @@ et_run_one() {
     if [[ $no_harness -eq 0 ]]; then
       summary="$(grep -E '^test result:' "$run_log" | tail -n1 || true)"
     else
-      summary="$(tail -n1 "$run_log" | tr -d '\r' || true)"
+      summary="$(grep -E '^own-main result:' "$run_log" | tail -n1 || true)"
+      if [[ -z "$summary" ]]; then
+        summary="$(tail -n1 "$run_log" | tr -d '\r' || true)"
+      fi
     fi
     if [[ -n "$summary" ]]; then
       echo "  PASS     $suite/$name — $summary"

@@ -39,6 +39,8 @@ Options:
                            (default: ./default-runner.sh)
   --compile-script PATH    rustc wrapper: <log> -- <rustc-args...>
                            (default: ./default-compile.sh; harness builds flags)
+  --own-main               generate a lightweight main that calls each #[test]
+                           (no libtest / rustc --test); better for small RTOS
   -h, --help               show this help
 
 Also from environment (not CLI):
@@ -55,6 +57,7 @@ ARG_CARGO=""
 ARG_TARGET=""
 ARG_RUNNER=""
 ARG_COMPILE=""
+ARG_OWN_MAIN=0
 
 if [[ $# -lt 1 ]]; then
   usage
@@ -150,6 +153,10 @@ while [[ $# -gt 0 ]]; do
       ARG_COMPILE="${1#--compile-script=}"
       shift
       ;;
+    --own-main)
+      ARG_OWN_MAIN=1
+      shift
+      ;;
     -h|--help)
       usage
       exit 0
@@ -179,6 +186,7 @@ if [[ -n "$ARG_CARGO" ]]; then
   ET_CARGO="$ARG_CARGO"
 fi
 ET_TARGET="${ARG_TARGET:-${ET_TARGET:-}}"
+ET_OWN_MAIN="$ARG_OWN_MAIN"
 
 ET_LIBRARY="$(et_resolve_library_src)"
 mkdir -p "$ET_OUT"
@@ -228,6 +236,11 @@ if [[ -n "${ET_TARGET:-}" ]]; then
   echo "target:   $ET_TARGET (cross)"
 else
   echo "target:   host"
+fi
+if [[ "${ET_OWN_MAIN:-0}" == "1" ]]; then
+  echo "harness:  own-main (no libtest)"
+else
+  echo "harness:  rustc --test (libtest)"
 fi
 echo "tiers:    0..$REQUESTED_TIER"
 echo
