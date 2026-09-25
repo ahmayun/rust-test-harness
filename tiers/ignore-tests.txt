@@ -1,0 +1,7 @@
+# Tests to #[ignore] in the staged copy only (sysroot vs library-source skew).
+# Format: path/relative/to/staged/crate/root::function_name
+# For alloctests, paths are relative to the staged alloctests package root.
+#
+# issue_162452 checks VecDeque capacity reuse; prebuilt std can differ from
+# in-tree sources when not rebuilding the library.
+alloctests/tests/vec_deque.rs::issue_162452_vec_deque_from_empty_vec_into_iter

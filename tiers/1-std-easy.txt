@@ -1,0 +1,18 @@
+# Tier 1: single-file std tests with no #![feature] and no mod common.
+# Paths relative to RUST_LIBRARY_SRC (default: ../rust/library).
+std/tests/ambiguous-hash_map.rs
+std/tests/builtin-clone.rs
+std/tests/eq-multidispatch.rs
+std/tests/istr.rs
+std/tests/log-knows-the-names-of-variants-in-std.rs
+std/tests/minmax-stability-issue-23687.rs
+std/tests/num.rs
+std/tests/panic.rs
+std/tests/run-time-detect.rs
+std/tests/seq-compare.rs
+std/tests/slice-from-array-issue-113238.rs
+std/tests/type-name-unsized.rs
+std/tests/volatile-fat-ptr.rs
+# Windows-only (cfg); harmless empty suite on Linux.
+std/tests/win_delete_self.rs
+std/tests/windows.rs

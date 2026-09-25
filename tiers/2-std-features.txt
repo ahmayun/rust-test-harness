@@ -1,0 +1,13 @@
+# Tier 2: single-file std tests (features and/or mod common).
+# Paths relative to RUST_LIBRARY_SRC.
+# mod common tests need host-built rand (prepared by run.sh).
+std/tests/create_dir_all_bare.rs
+std/tests/env.rs
+std/tests/env_modify.rs
+std/tests/error.rs
+std/tests/path.rs
+std/tests/process_spawning.rs
+std/tests/switch-stdout.rs
+std/tests/thread.rs
+std/tests/time.rs
+std/tests/windows_unix_socket.rs

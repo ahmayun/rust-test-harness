@@ -1,0 +1,5 @@
+# Tier 4: previously hard outliers — enabled with staging / no-harness mode.
+# Paths relative to RUST_LIBRARY_SRC.
+std/tests/pipe_subprocess.rs
+alloctests/tests/c_str_alloc_error.rs
+alloctests/tests/vec_deque_alloc_error.rs

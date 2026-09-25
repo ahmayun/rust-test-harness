@@ -1,0 +1,2 @@
+# Tier 0: local smoke crate (path relative to external-tester/)
+smoke/smoke.rs

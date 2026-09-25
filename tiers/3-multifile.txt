@@ -1,0 +1,6 @@
+# Tier 3: multi-file integration crates.
+# Paths relative to RUST_LIBRARY_SRC.
+# Staged into out/stage/ with feature fixups as needed.
+std/tests/sync/lib.rs
+std/tests/thread_local/lib.rs
+alloctests/tests/lib.rs
