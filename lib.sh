@@ -303,9 +303,8 @@ et_stage_src() {
   echo "$staged"
 }
 
-# Rewrite staged crate to call #[test] fns from a generated main (no libtest).
-# Expands macros via rustc -Zunpretty=expanded when ET_RUSTC is set so
-# macro-generated tests match libtest coverage as closely as possible.
+# Prepare staged crate for --own-main: strip #[test], write et_own_tests.json.
+# Does not emit a multi-test orchestrator — scripts compile one binary per test.
 et_apply_own_main() {
   local staged="$1"
   if [[ "${ET_OWN_MAIN:-0}" != "1" ]]; then
@@ -321,7 +320,185 @@ et_apply_own_main() {
   ET_TARGET="${ET_TARGET:-}" \
   ET_EXPAND_FLAGS="${expand_flags[*]}" \
   RUSTC_BOOTSTRAP="${RUSTC_BOOTSTRAP:-1}" \
-    python3 "$ET_OWN_MAIN_PY" "$staged"
+    python3 "$ET_OWN_MAIN_PY" prepare "$staged"
+}
+
+# Exit codes from a single-test own-main binary.
+ET_OWN_SKIP_EXIT=77
+
+# Compile+run every test in an own-main manifest (one binary per test).
+# Updates ET_TEST_* counters. Sets ET_LAST_SUMMARY. Returns 0 if no failures.
+et_run_own_main_tests() {
+  local suite="$1"
+  local name="$2"
+  local src="$3"
+  local staged="$4"
+  local suite_dir="$5"
+
+  local manifest
+  manifest="$(dirname "$staged")/et_own_tests.json"
+  if [[ ! -f "$manifest" ]]; then
+    echo "    missing own-main manifest: $manifest" >&2
+    return 1
+  fi
+
+  local n
+  n="$(python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1]))["tests"]))' "$manifest")"
+  local skip_exit
+  skip_exit="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("skip_exit", 77))' "$manifest")"
+
+  local passed=0 failed=0 ignored=0
+  local i meta path should_panic ignore
+  local bin compile_log run_log rc
+  local any_compile_fail=0
+
+  # Incremental dir shared across per-test rebuilds of the same crate.
+  local incr_dir="$suite_dir/.incr-$name"
+  mkdir -p "$incr_dir"
+
+  if [[ "$n" -eq 0 ]]; then
+    # No #[test]s (or pre-existing main): compile/run the staged root once.
+    bin="$suite_dir/$name"
+    compile_log="$suite_dir/${name}.compile.log"
+    run_log="$suite_dir/${name}.run.log"
+    echo "  COMPILE  $suite/$name"
+    if ! RUSTFLAGS="${RUSTFLAGS:-} -C incremental=$incr_dir" \
+        et_compile_with_fixups "$staged" "$bin" "$compile_log"; then
+      echo "  COMPILE-FAIL  $suite/$name"
+      echo "    see $compile_log"
+      ET_COMPILE_FAIL=$((ET_COMPILE_FAIL + 1))
+      return 1
+    fi
+    ET_COMPILE_OK=$((ET_COMPILE_OK + 1))
+    echo "  RUN      $suite/$name"
+    set +e
+    ET_TEST_SUITE="$suite" \
+    ET_TEST_NAME="$name" \
+    ET_TEST_SRC="$src" \
+    ET_TEST_STAGED="$staged" \
+    ET_TEST_NO_HARNESS=1 \
+    ET_TEST_TARGET="${ET_TARGET:-}" \
+    ET_RUSTC="$ET_RUSTC" \
+      "$ET_RUNNER" "$bin" >"$run_log" 2>&1
+    rc=$?
+    set -e
+    if [[ $rc -eq 0 ]]; then
+      passed=1
+      ET_RUN_OK=$((ET_RUN_OK + 1))
+      ET_PASS=$((ET_PASS + 1))
+    else
+      failed=1
+      ET_RUN_FAIL=$((ET_RUN_FAIL + 1))
+      ET_FAIL=$((ET_FAIL + 1))
+    fi
+    ET_LAST_SUMMARY="own-main result: ${passed} passed; ${failed} failed; ${ignored} ignored"
+    ET_TEST_PASS=$((ET_TEST_PASS + passed))
+    ET_TEST_FAIL=$((ET_TEST_FAIL + failed))
+    ET_TEST_IGNORE=$((ET_TEST_IGNORE + ignored))
+    if [[ $failed -eq 0 ]]; then
+      return 0
+    fi
+    return 1
+  fi
+
+  echo "  COMPILE+RUN  $suite/$name ($n tests, one binary each)"
+  local first_ok=0
+  local done=0
+  local total_run=$n
+
+  for ((i = 0; i < n; i++)); do
+    meta="$(python3 -c 'import json,sys; t=json.load(open(sys.argv[1]))["tests"][int(sys.argv[2])]; import json as J; print(J.dumps(t))' "$manifest" "$i")"
+    path="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["path"])' "$meta")"
+    should_panic="$(python3 -c 'import json,sys; print("1" if json.loads(sys.argv[1]).get("should_panic") else "0")' "$meta")"
+    ignore="$(python3 -c 'import json,sys; print("1" if json.loads(sys.argv[1]).get("ignore") else "0")' "$meta")"
+    done=$((i + 1))
+    local prog="[$done/$total_run]"
+
+    if [[ "$ignore" == "1" ]]; then
+      ignored=$((ignored + 1))
+      echo "    $prog ignored  $path"
+      continue
+    fi
+
+    if ! python3 "$ET_OWN_MAIN_PY" set-main "$staged" "$i" >/dev/null; then
+      echo "    $prog FAIL     set-main $path"
+      failed=$((failed + 1))
+      any_compile_fail=1
+      continue
+    fi
+
+    bin="$suite_dir/${name}__$i"
+    compile_log="$suite_dir/${name}__$i.compile.log"
+    run_log="$suite_dir/${name}__$i.run.log"
+
+    if ! RUSTFLAGS="${RUSTFLAGS:-} -C incremental=$incr_dir" \
+        et_compile_with_fixups "$staged" "$bin" "$compile_log"; then
+      echo "    $prog COMPILE-FAIL  $path"
+      echo "      see $compile_log"
+      failed=$((failed + 1))
+      any_compile_fail=1
+      continue
+    fi
+    first_ok=1
+
+    set +e
+    ET_TEST_SUITE="$suite" \
+    ET_TEST_NAME="${name}__$i" \
+    ET_TEST_SRC="$src" \
+    ET_TEST_STAGED="$staged" \
+    ET_TEST_NO_HARNESS=1 \
+    ET_TEST_PATH="$path" \
+    ET_TEST_TARGET="${ET_TARGET:-}" \
+    ET_RUSTC="$ET_RUSTC" \
+      "$ET_RUNNER" "$bin" >"$run_log" 2>&1
+    rc=$?
+    set -e
+
+    if [[ $rc -eq "$skip_exit" ]]; then
+      ignored=$((ignored + 1))
+      echo "    $prog skipped  $path (cfg)"
+      continue
+    fi
+
+    if [[ "$should_panic" == "1" ]]; then
+      if [[ $rc -ne 0 ]]; then
+        passed=$((passed + 1))
+        echo "    $prog ok       $path (should_panic)"
+      else
+        echo "    $prog FAIL     $path (expected panic/abort)"
+        failed=$((failed + 1))
+      fi
+    else
+      if [[ $rc -eq 0 ]]; then
+        passed=$((passed + 1))
+        echo "    $prog ok       $path"
+      else
+        echo "    $prog FAIL     $path (exit $rc)"
+        echo "      see $run_log"
+        failed=$((failed + 1))
+      fi
+    fi
+  done
+
+  if [[ $first_ok -eq 1 && $any_compile_fail -eq 0 ]]; then
+    ET_COMPILE_OK=$((ET_COMPILE_OK + 1))
+  elif [[ $any_compile_fail -eq 1 || $first_ok -eq 0 ]]; then
+    ET_COMPILE_FAIL=$((ET_COMPILE_FAIL + 1))
+  fi
+
+  ET_LAST_SUMMARY="own-main result: ${passed} passed; ${failed} failed; ${ignored} ignored"
+  ET_TEST_PASS=$((ET_TEST_PASS + passed))
+  ET_TEST_FAIL=$((ET_TEST_FAIL + failed))
+  ET_TEST_IGNORE=$((ET_TEST_IGNORE + ignored))
+
+  if [[ $failed -eq 0 ]]; then
+    ET_RUN_OK=$((ET_RUN_OK + 1))
+    ET_PASS=$((ET_PASS + 1))
+    return 0
+  fi
+  ET_RUN_FAIL=$((ET_RUN_FAIL + 1))
+  ET_FAIL=$((ET_FAIL + 1))
+  return 1
 }
 
 # Build rustc argv and invoke COMPILE_SCRIPT; retry with feature fixups on failure.
@@ -437,10 +614,22 @@ et_run_one() {
   elif [[ "${ET_OWN_MAIN:-0}" == "1" ]]; then
     no_harness=1
     if ! et_apply_own_main "$staged"; then
-      echo "  COMPILE-FAIL  $suite/$name (own-main rewrite)"
+      echo "  COMPILE-FAIL  $suite/$name (own-main prepare)"
       ET_COMPILE_FAIL=$((ET_COMPILE_FAIL + 1))
       return 0
     fi
+    # One binary per test; scripts drive compile/run/aggregation.
+    set +e
+    et_run_own_main_tests "$suite" "$name" "$src" "$staged" "$suite_dir"
+    local own_rc=$?
+    set -e
+    if [[ $own_rc -eq 0 ]]; then
+      echo "  PASS     $suite/$name — $ET_LAST_SUMMARY"
+    else
+      echo "  FAIL     $suite/$name"
+      echo "    $ET_LAST_SUMMARY"
+    fi
+    return 0
   else
     mode_args=(--test)
   fi
