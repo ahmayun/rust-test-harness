@@ -143,12 +143,17 @@ rand = { version = "0.9.0", default-features = false, features = ["alloc"] }
 rand_xorshift = "0.4.0"
 EOF
   fi
-  echo 'pub use rand; pub use rand_xorshift;' >"$manifest_dir/lib.rs"
+  echo '#![feature(restricted_std)]' >"$manifest_dir/lib.rs"
+  echo 'pub use rand; pub use rand_xorshift;' >>"$manifest_dir/lib.rs"
 
   echo "Preparing deps (rand, rand_xorshift) with host cargo + given rustc..."
   if [[ -n "${ET_TARGET:-}" ]]; then
     echo "  cross target: $ET_TARGET"
   fi
+  # Targets whose std is built with cfg(restricted_std) (e.g. hexagon-unknown-qurt)
+  # require #![feature(restricted_std)] on every crate that uses std — including
+  # crates.io deps. Inject it via --crate-attr so rand/rand_xorshift get it too.
+  local dep_rustflags="${RUSTFLAGS:-} --crate-attr=feature(restricted_std)"
   local cargo_args=(build --release)
   if [[ -n "${ET_TARGET:-}" ]]; then
     cargo_args+=(--target "$ET_TARGET")
@@ -162,6 +167,7 @@ EOF
     CARGO_TARGET_DIR="$target_dir" \
       RUSTC="$ET_RUSTC" \
       RUSTC_BOOTSTRAP=1 \
+      RUSTFLAGS="$dep_rustflags" \
       "$cargo" "${cargo_args[@]}"
   ) >"$deps_dir/build.log" 2>&1; then
     echo "warning: deps build failed; see $deps_dir/build.log" >&2
@@ -180,6 +186,8 @@ path = "lib.rs"
 rand = { version = "0.9.0", default-features = false, features = ["alloc"] }
 rand_xorshift = "0.4.0"
 EOF
+      echo '#![feature(restricted_std)]' >"$manifest_dir/lib.rs"
+      echo 'pub use rand; pub use rand_xorshift;' >>"$manifest_dir/lib.rs"
       local retry_args=(build --release)
       if [[ -n "${ET_TARGET:-}" ]]; then
         retry_args+=(--target "$ET_TARGET")
@@ -189,6 +197,7 @@ EOF
         CARGO_TARGET_DIR="$target_dir" \
           RUSTC="$ET_RUSTC" \
           RUSTC_BOOTSTRAP=1 \
+          RUSTFLAGS="$dep_rustflags" \
           "$cargo" "${retry_args[@]}"
       ) >"$deps_dir/build.log" 2>&1; then
         echo "warning: deps build failed again; continuing without rand" >&2
@@ -313,6 +322,9 @@ et_apply_own_main() {
   local expand_flags=()
   if ((ET_DEP_READY)); then
     expand_flags+=("${ET_DEP_LFLAGS[@]}")
+  fi
+  if [[ -n "${ET_TARGET:-}" ]]; then
+    expand_flags+=(--crate-attr=feature(restricted_std))
   fi
   # shellcheck disable=SC2086
   ET_RUSTC="$ET_RUSTC" \
@@ -522,6 +534,8 @@ et_compile_with_fixups() {
     )
     if [[ -n "${ET_TARGET:-}" ]]; then
       cmd+=(--target "$ET_TARGET")
+      # Same gate as et_prepare_deps: restricted_std sysroots need this on every crate.
+      cmd+=(--crate-attr=feature(restricted_std))
     fi
     if ((${#mode_args[@]})); then
       cmd+=("${mode_args[@]}")
