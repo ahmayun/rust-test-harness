@@ -152,8 +152,8 @@ EOF
   fi
   # Targets whose std is built with cfg(restricted_std) (e.g. hexagon-unknown-qurt)
   # require #![feature(restricted_std)] on every crate that uses std — including
-  # crates.io deps. Inject it via --crate-attr so rand/rand_xorshift get it too.
-  local dep_rustflags="${RUSTFLAGS:-} --crate-attr=feature(restricted_std)"
+  # crates.io deps. Inject it via -Zcrate-attr so rand/rand_xorshift get it too.
+  local dep_rustflags="${RUSTFLAGS:-} -Zcrate-attr=feature(restricted_std)"
   local cargo_args=(build --release)
   if [[ -n "${ET_TARGET:-}" ]]; then
     cargo_args+=(--target "$ET_TARGET")
@@ -324,7 +324,7 @@ et_apply_own_main() {
     expand_flags+=("${ET_DEP_LFLAGS[@]}")
   fi
   if [[ -n "${ET_TARGET:-}" ]]; then
-    expand_flags+=('--crate-attr=feature(restricted_std)')
+    expand_flags+=('-Zcrate-attr=feature(restricted_std)')
   fi
   # shellcheck disable=SC2086
   ET_RUSTC="$ET_RUSTC" \
@@ -535,7 +535,7 @@ et_compile_with_fixups() {
     if [[ -n "${ET_TARGET:-}" ]]; then
       cmd+=(--target "$ET_TARGET")
       # Same gate as et_prepare_deps: restricted_std sysroots need this on every crate.
-      cmd+=('--crate-attr=feature(restricted_std)')
+      cmd+=('-Zcrate-attr=feature(restricted_std)')
     fi
     if ((${#mode_args[@]})); then
       cmd+=("${mode_args[@]}")
