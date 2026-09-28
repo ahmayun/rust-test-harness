@@ -143,17 +143,16 @@ rand = { version = "0.9.0", default-features = false, features = ["alloc"] }
 rand_xorshift = "0.4.0"
 EOF
   fi
-  echo '#![feature(restricted_std)]' >"$manifest_dir/lib.rs"
+  # rand / rand_xorshift are built no_std (alloc only). Keep the wrapper no_std
+  # too — do NOT inject #![feature(restricted_std)] into cargo RUSTFLAGS, or
+  # no_std crates like rand_core fail with "unknown feature `restricted_std`".
+  echo '#![no_std]' >"$manifest_dir/lib.rs"
   echo 'pub use rand; pub use rand_xorshift;' >>"$manifest_dir/lib.rs"
 
   echo "Preparing deps (rand, rand_xorshift) with host cargo + given rustc..."
   if [[ -n "${ET_TARGET:-}" ]]; then
     echo "  cross target: $ET_TARGET"
   fi
-  # Targets whose std is built with cfg(restricted_std) (e.g. hexagon-unknown-qurt)
-  # require #![feature(restricted_std)] on every crate that uses std — including
-  # crates.io deps. Inject it via -Zcrate-attr so rand/rand_xorshift get it too.
-  local dep_rustflags="${RUSTFLAGS:-} -Zcrate-attr=feature(restricted_std)"
   local cargo_args=(build --release)
   if [[ -n "${ET_TARGET:-}" ]]; then
     cargo_args+=(--target "$ET_TARGET")
@@ -167,7 +166,6 @@ EOF
     CARGO_TARGET_DIR="$target_dir" \
       RUSTC="$ET_RUSTC" \
       RUSTC_BOOTSTRAP=1 \
-      RUSTFLAGS="$dep_rustflags" \
       "$cargo" "${cargo_args[@]}"
   ) >"$deps_dir/build.log" 2>&1; then
     echo "warning: deps build failed; see $deps_dir/build.log" >&2
@@ -186,7 +184,7 @@ path = "lib.rs"
 rand = { version = "0.9.0", default-features = false, features = ["alloc"] }
 rand_xorshift = "0.4.0"
 EOF
-      echo '#![feature(restricted_std)]' >"$manifest_dir/lib.rs"
+      echo '#![no_std]' >"$manifest_dir/lib.rs"
       echo 'pub use rand; pub use rand_xorshift;' >>"$manifest_dir/lib.rs"
       local retry_args=(build --release)
       if [[ -n "${ET_TARGET:-}" ]]; then
@@ -197,7 +195,6 @@ EOF
         CARGO_TARGET_DIR="$target_dir" \
           RUSTC="$ET_RUSTC" \
           RUSTC_BOOTSTRAP=1 \
-          RUSTFLAGS="$dep_rustflags" \
           "$cargo" "${retry_args[@]}"
       ) >"$deps_dir/build.log" 2>&1; then
         echo "warning: deps build failed again; continuing without rand" >&2
