@@ -18,6 +18,11 @@ ET_DEP_READY=0
 ET_TARGET="${ET_TARGET:-}"
 # When 1, generate a hand-written main instead of using rustc --test / libtest.
 ET_OWN_MAIN="${ET_OWN_MAIN:-0}"
+# Orchestrator kills the runner if a test (or suite binary) exceeds this many
+# seconds. 0 disables. Override with ET_RUN_TIMEOUT.
+ET_RUN_TIMEOUT="${ET_RUN_TIMEOUT:-120}"
+# Exit status GNU `timeout` uses when the command is killed for exceeding the limit.
+ET_TIMEOUT_EXIT=124
 
 # Counters (global; run.sh resets them)
 # Files = allowlisted crate roots. Tests = individual #[test] cases from harness output.
@@ -36,6 +41,19 @@ ET_FAIL=0
 et_die() {
   echo "error: $*" >&2
   exit 1
+}
+
+# Run ET_RUNNER under an orchestrator-side wall-clock timeout.
+# Preserves the runner's exit status; on timeout returns ET_TIMEOUT_EXIT (124).
+et_invoke_runner() {
+  local bin="$1"
+  shift
+  if [[ "${ET_RUN_TIMEOUT:-0}" -gt 0 ]] && command -v timeout >/dev/null 2>&1; then
+    # --kill-after: if the runner ignores SIGTERM, escalate after a few seconds.
+    timeout --kill-after=5s "${ET_RUN_TIMEOUT}s" "$ET_RUNNER" "$bin" "$@"
+  else
+    "$ET_RUNNER" "$bin" "$@"
+  fi
 }
 
 et_resolve_rustc() {
@@ -388,7 +406,7 @@ et_run_own_main_tests() {
     ET_TEST_NO_HARNESS=1 \
     ET_TEST_TARGET="${ET_TARGET:-}" \
     ET_RUSTC="$ET_RUSTC" \
-      "$ET_RUNNER" "$bin" >"$run_log" 2>&1
+      et_invoke_runner "$bin" >"$run_log" 2>&1
     rc=$?
     set -e
     if [[ $rc -eq 0 ]]; then
@@ -396,6 +414,9 @@ et_run_own_main_tests() {
       ET_RUN_OK=$((ET_RUN_OK + 1))
       ET_PASS=$((ET_PASS + 1))
     else
+      if [[ $rc -eq "$ET_TIMEOUT_EXIT" ]]; then
+        echo "  TIMEOUT  $suite/$name (exceeded ${ET_RUN_TIMEOUT}s)"
+      fi
       failed=1
       ET_RUN_FAIL=$((ET_RUN_FAIL + 1))
       ET_FAIL=$((ET_FAIL + 1))
@@ -459,9 +480,16 @@ et_run_own_main_tests() {
     ET_TEST_PATH="$path" \
     ET_TEST_TARGET="${ET_TARGET:-}" \
     ET_RUSTC="$ET_RUSTC" \
-      "$ET_RUNNER" "$bin" >"$run_log" 2>&1
+      et_invoke_runner "$bin" >"$run_log" 2>&1
     rc=$?
     set -e
+
+    if [[ $rc -eq "$ET_TIMEOUT_EXIT" ]]; then
+      echo "    $prog TIMEOUT  $path (exceeded ${ET_RUN_TIMEOUT}s)"
+      echo "      see $run_log"
+      failed=$((failed + 1))
+      continue
+    fi
 
     if [[ $rc -eq "$skip_exit" ]]; then
       ignored=$((ignored + 1))
@@ -663,7 +691,7 @@ et_run_one() {
   ET_TEST_NO_HARNESS="$no_harness" \
   ET_TEST_TARGET="${ET_TARGET:-}" \
   ET_RUSTC="$ET_RUSTC" \
-    "$ET_RUNNER" "$bin" >"$run_log" 2>&1
+    et_invoke_runner "$bin" >"$run_log" 2>&1
   local rc=$?
   set -e
 
@@ -683,7 +711,11 @@ et_run_one() {
     ET_RUN_OK=$((ET_RUN_OK + 1))
     ET_PASS=$((ET_PASS + 1))
   else
-    echo "  FAIL     $suite/$name (exit $rc)"
+    if [[ $rc -eq "$ET_TIMEOUT_EXIT" ]]; then
+      echo "  TIMEOUT  $suite/$name (exceeded ${ET_RUN_TIMEOUT}s)"
+    else
+      echo "  FAIL     $suite/$name (exit $rc)"
+    fi
     echo "    see $run_log"
     [[ -n "$ET_LAST_SUMMARY" ]] && echo "    $ET_LAST_SUMMARY"
     ET_RUN_FAIL=$((ET_RUN_FAIL + 1))
